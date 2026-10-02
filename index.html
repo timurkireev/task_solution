@@ -29,7 +29,7 @@
     const N = 50;
     const GRID_SIZE = 3.0;
     const DT = 0.08;
-    const ITERS = 40;
+    const ITERS = 20;
 
     function vertexIndex(x, y) {
       return y * (N + 1) + x;
@@ -170,6 +170,7 @@
     }
 
     const positionsBuffer = saveBuffer(initialPositions);
+    const oldPositionsBuffer = saveBuffer(initialPositions);
     const newPositionsBuffer = saveBuffer(initialPositions);
     const velocityBuffer = saveBuffer(initialVelocities);
     const neighborsBuffer = saveBuffer(neighborLists);
@@ -212,39 +213,44 @@
         };
 
         @group(0) @binding(0) var<storage, read_write> pos: array<vec3<f32>>;
-        @group(0) @binding(1) var<storage, read_write> newPos: array<vec3<f32>>;
-        @group(0) @binding(2) var<storage, read_write> vel: array<vec3<f32>>;
-        @group(0) @binding(3) var<storage, read_write> neighbors: array<u32>;
-        @group(0) @binding(4) var<storage, read_write> neighborCounts: array<u32>;
-        @group(0) @binding(5) var<storage, read_write> isFixed: array<u32>;
-        @group(0) @binding(6) var<uniform> p: Params;
+        @group(0) @binding(1) var<storage, read_write> oldPos: array<vec3<f32>>;
+        @group(0) @binding(2) var<storage, read_write> newPos: array<vec3<f32>>;
+        @group(0) @binding(3) var<storage, read_write> vel: array<vec3<f32>>;
+        @group(0) @binding(4) var<storage, read_write> neighbors: array<u32>;
+        @group(0) @binding(5) var<storage, read_write> neighborCounts: array<u32>;
+        @group(0) @binding(6) var<storage, read_write> isFixed: array<u32>;
+        @group(0) @binding(7) var<uniform> p: Params;
 
         fn isCentralVertex(i: u32) -> bool {
           return i == (p.N / 2) * (p.N + 1) + (p.N / 2);
         }
 
         @compute @workgroup_size(64)
-        fn calcPositions(@builtin(global_invocation_id) gid: vec3<u32>) {
+        fn calcInitialPositions(@builtin(global_invocation_id) gid: vec3<u32>) {
           let i = gid.x;
           if (i >= p.vertexCount) { return; }
 
           if (isFixed[i] != 0) {
-            vel[i] = vec3<f32>(0.0);
+            oldPos[i] = pos[i];
             newPos[i] = pos[i];
+            vel[i] = vec3<f32>(0.0);
             return;
           }
 
           if (isCentralVertex(i)) {
-            let targetY = 0.35 + sin(p.time);
+            let targetY = 0.35 + 0.25 * sin(p.time);
             pos[i] = vec3<f32>(pos[i].x, targetY, pos[i].z);
+            oldPos[i] = pos[i];
             newPos[i] = pos[i];
             vel[i] = vec3<f32>(0.0);
             return;
           }
 
           var g = vec3<f32>(0, 0, 0);
-          if (p.gravityEnabled != 0) { g[1] = -0.5; }
-          vel[i] = vel[i] + g * p.dt;
+          if (p.gravityEnabled != 0) { g.y = -0.1; }
+          vel[i] = 0.99 * (vel[i] + g * p.dt);
+
+          oldPos[i] = pos[i];
           newPos[i] = pos[i] + vel[i] * p.dt;
         }
 
@@ -255,12 +261,16 @@
 
           if (isFixed[i] != 0 || isCentralVertex(i)) { return; }
 
+          var correction = vec3<f32>(0.0);
+          var count = 0.0;
+
           for (var k: u32 = 0; k < 8; k = k + 1) {
             if (k >= neighborCounts[i]) { break; }
 
             let j = neighbors[i * 8 + k];
             let d = pos[i] - pos[j];
             let len = length(d);
+            if (len < 1e-6) { continue; }
 
             let ix = i % (p.N + 1);
             let iy = i / (p.N + 1);
@@ -270,21 +280,36 @@
 
             var edgeLen = p.edgeLen; 
             if (isDiagonal) { edgeLen = sqrt(2) * p.edgeLen; }
-            let stiffness = 0.3;
-            newPos[i] += (-0.5 * stiffness * (len - edgeLen)) * (d / len);
+            let stiffness = 0.9;
+            correction += (-0.5 * stiffness * (len - edgeLen)) * (d / len);
+            count += 1;
           }
+
+          if (count > 0) { correction /= count; }
+
+          newPos[i] += correction;
         }
 
         @compute @workgroup_size(64)
-        fn applyConstraints(@builtin(global_invocation_id) gid: vec3<u32>) {
+        fn applyPositions(@builtin(global_invocation_id) gid: vec3<u32>) {
           let i = gid.x;
           if (i >= p.vertexCount) { return; }
 
           if (isFixed[i] != 0 || isCentralVertex(i)) { return; }
           
-          vel[i] = (newPos[i] - pos[i]) / p.dt;
           pos[i] = newPos[i];
         }
+
+        @compute @workgroup_size(64)
+        fn applyVelocity(@builtin(global_invocation_id) gid: vec3<u32>) {
+          let i = gid.x;
+          if (i >= p.vertexCount) { return; }
+
+          if (isFixed[i] != 0 || isCentralVertex(i)) { return; }
+          
+          vel[i] = (newPos[i] - oldPos[i]) / p.dt;
+        }
+
         `
     });
 
@@ -296,7 +321,8 @@
         { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
         { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
         { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
-        { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
+        { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+        { binding: 7, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
       ]
     });
 
@@ -304,11 +330,11 @@
       bindGroupLayouts: [computeBindGroupLayout]
     });
 
-    const calcPositionsPipeline = device.createComputePipeline({
+    const calcInitialPositionsPipeline = device.createComputePipeline({
       layout: computePipelineLayout,
       compute: {
         module: computeShader,
-        entryPoint: "calcPositions"
+        entryPoint: "calcInitialPositions"
       }
     });
 
@@ -320,11 +346,19 @@
       }
     });
 
-    const applyConstraintsPipeline = device.createComputePipeline({
+    const applyPositionsPipeline = device.createComputePipeline({
       layout: computePipelineLayout,
       compute: {
         module: computeShader,
-        entryPoint: "applyConstraints"
+        entryPoint: "applyPositions"
+      }
+    });
+    
+    const applyVelocityPipeline = device.createComputePipeline({
+      layout: computePipelineLayout,
+      compute: {
+        module: computeShader,
+        entryPoint: "applyVelocity"
       }
     });
 
@@ -332,12 +366,13 @@
       layout: computeBindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: positionsBuffer } },
-        { binding: 1, resource: { buffer: newPositionsBuffer } },
-        { binding: 2, resource: { buffer: velocityBuffer } },
-        { binding: 3, resource: { buffer: neighborsBuffer } },
-        { binding: 4, resource: { buffer: countsBuffer } },
-        { binding: 5, resource: { buffer: flagsBuffer } },
-        { binding: 6, resource: { buffer: uniformBuffer } },
+        { binding: 1, resource: { buffer: oldPositionsBuffer } },
+        { binding: 2, resource: { buffer: newPositionsBuffer } },
+        { binding: 3, resource: { buffer: velocityBuffer } },
+        { binding: 4, resource: { buffer: neighborsBuffer } },
+        { binding: 5, resource: { buffer: countsBuffer } },
+        { binding: 6, resource: { buffer: flagsBuffer } },
+        { binding: 7, resource: { buffer: uniformBuffer } },
       ]
     });
 
@@ -436,16 +471,19 @@
 
       pass.setBindGroup(0, computeBindGroup);
 
-      pass.setPipeline(calcPositionsPipeline);
+      pass.setPipeline(calcInitialPositionsPipeline);
       pass.dispatchWorkgroups(Math.ceil(VERTEX_COUNT / 64));
 
       for (let i = 0; i < ITERS; ++i) {
         pass.setPipeline(solveConstraintsPipeline);
         pass.dispatchWorkgroups(Math.ceil(VERTEX_COUNT / 64));
 
-        pass.setPipeline(applyConstraintsPipeline);
+        pass.setPipeline(applyPositionsPipeline);
         pass.dispatchWorkgroups(Math.ceil(VERTEX_COUNT / 64));
       }
+      
+      pass.setPipeline(applyVelocityPipeline);
+      pass.dispatchWorkgroups(Math.ceil(VERTEX_COUNT / 64));
 
       pass.end();
       device.queue.submit([encoder.finish()]);
