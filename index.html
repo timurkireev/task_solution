@@ -295,7 +295,7 @@
             count += 1;*/
 
             // XPBD
-            let alpha = 0.005;
+            let alpha = 0.000001;
             let alphaTilde = alpha / (p.dt * p.dt);
             let oldLambda = lambdas[i * 8 + k];
             let deltaLambda = -(C + alphaTilde * oldLambda) / (2 + alphaTilde);
