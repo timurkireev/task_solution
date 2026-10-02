@@ -28,7 +28,7 @@
 
     const N = 50;
     const GRID_SIZE = 3.0;
-    const DT = 0.08;
+    const DT = 0.1;
     const ITERS = 20;
 
     function vertexIndex(x, y) {
@@ -173,6 +173,7 @@
     const oldPositionsBuffer = saveBuffer(initialPositions);
     const newPositionsBuffer = saveBuffer(initialPositions);
     const velocityBuffer = saveBuffer(initialVelocities);
+    const lambdasBuffer = saveBuffer(new Float32Array(VERTEX_COUNT * 8));
     const neighborsBuffer = saveBuffer(neighborLists);
     const countsBuffer = saveBuffer(neighborCounts);
     const flagsBuffer = saveBuffer(fixedFlags);
@@ -216,10 +217,11 @@
         @group(0) @binding(1) var<storage, read_write> oldPos: array<vec3<f32>>;
         @group(0) @binding(2) var<storage, read_write> newPos: array<vec3<f32>>;
         @group(0) @binding(3) var<storage, read_write> vel: array<vec3<f32>>;
-        @group(0) @binding(4) var<storage, read_write> neighbors: array<u32>;
-        @group(0) @binding(5) var<storage, read_write> neighborCounts: array<u32>;
-        @group(0) @binding(6) var<storage, read_write> isFixed: array<u32>;
-        @group(0) @binding(7) var<uniform> p: Params;
+        @group(0) @binding(4) var<storage, read_write> lambdas: array<f32>;
+        @group(0) @binding(5) var<storage, read_write> neighbors: array<u32>;
+        @group(0) @binding(6) var<storage, read_write> neighborCounts: array<u32>;
+        @group(0) @binding(7) var<storage, read_write> isFixed: array<u32>;
+        @group(0) @binding(8) var<uniform> p: Params;
 
         fn isCentralVertex(i: u32) -> bool {
           return i == (p.N / 2) * (p.N + 1) + (p.N / 2);
@@ -252,6 +254,10 @@
 
           oldPos[i] = pos[i];
           newPos[i] = pos[i] + vel[i] * p.dt;
+
+          for (var k: u32 = 0; k < 8; k = k + 1) {
+            lambdas[i * 8 + k] = 0.0;
+          }
         }
 
         @compute @workgroup_size(64)
@@ -270,7 +276,7 @@
             let j = neighbors[i * 8 + k];
             let d = pos[i] - pos[j];
             let len = length(d);
-            if (len < 1e-6) { continue; }
+            if (len < 1e-8) { continue; }
 
             let ix = i % (p.N + 1);
             let iy = i / (p.N + 1);
@@ -280,8 +286,21 @@
 
             var edgeLen = p.edgeLen; 
             if (isDiagonal) { edgeLen = sqrt(2) * p.edgeLen; }
-            let stiffness = 0.9;
-            correction += (-0.5 * stiffness * (len - edgeLen)) * (d / len);
+            let C = len - edgeLen;
+            let grad = d / len;
+
+            // PBD
+            /*let stiffness = 1.0;
+            correction += (-0.5 * stiffness * C) * grad;
+            count += 1;*/
+
+            // XPBD
+            let alpha = 0.005;
+            let alphaTilde = alpha / (p.dt * p.dt);
+            let oldLambda = lambdas[i * 8 + k];
+            let deltaLambda = -(C + alphaTilde * oldLambda) / (2 + alphaTilde);
+            lambdas[i * 8 + k] = oldLambda + deltaLambda;
+            correction += deltaLambda * grad;
             count += 1;
           }
 
@@ -322,7 +341,8 @@
         { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
         { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
         { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
-        { binding: 7, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
+        { binding: 7, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+        { binding: 8, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
       ]
     });
 
@@ -369,10 +389,11 @@
         { binding: 1, resource: { buffer: oldPositionsBuffer } },
         { binding: 2, resource: { buffer: newPositionsBuffer } },
         { binding: 3, resource: { buffer: velocityBuffer } },
-        { binding: 4, resource: { buffer: neighborsBuffer } },
-        { binding: 5, resource: { buffer: countsBuffer } },
-        { binding: 6, resource: { buffer: flagsBuffer } },
-        { binding: 7, resource: { buffer: uniformBuffer } },
+        { binding: 4, resource: { buffer: lambdasBuffer } },
+        { binding: 5, resource: { buffer: neighborsBuffer } },
+        { binding: 6, resource: { buffer: countsBuffer } },
+        { binding: 7, resource: { buffer: flagsBuffer } },
+        { binding: 8, resource: { buffer: uniformBuffer } },
       ]
     });
 
